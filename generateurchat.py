@@ -115,6 +115,15 @@ def get_router_interfaces(router_name, intent):
     for link in intent["links"]:
         for ep in link["endpoints"]:
             if ep["device"] == router_name:
+                ip, mask = ep["ip"].split("/")
                 interfaces.append({
                     "name": ep["interface"],
-                    "ip": ep["ip"].split("/")[0],
+                    "ip": ip,
+                    "mask": mask_to_dotted(mask)
+                })
+    return interfaces
+
+def mask_to_dotted(mask):
+    mask = int(mask)
+    bits = (0xffffffff >> (32 - mask)) << (32 - mask)
+    return ".".join(str((bits >> i) & 0xff) for i in [24,16,8,0])
