@@ -1,5 +1,6 @@
 {
   "network_name": "Multi-AS-Network",
+
   "autonomous_systems": [
     {
       "name": "AS_X",
@@ -16,9 +17,11 @@
       ],
       "ibgp": {
         "type": "full-mesh",
-        "update_source": "loopback"
+        "update_source": "loopback",
+        "send_community": true
       }
     },
+
     {
       "name": "AS_Y",
       "asn": 65002,
@@ -35,10 +38,12 @@
       ],
       "ibgp": {
         "type": "full-mesh",
-        "update_source": "loopback"
+        "update_source": "loopback",
+        "send_community": true
       }
     }
   ],
+
   "links": [
     {
       "endpoints": [
@@ -89,20 +94,41 @@
       ]
     }
   ],
+
   "bgp": {
+    "communities": {
+      "customer": "65001:100",
+      "peer": "65001:200",
+      "provider": "65001:300"
+    },
+
     "ebgp_peers": [
       {
         "local_router": "R1",
         "local_as": 65001,
         "remote_router": "R5",
-        "remote_as": 65002
+        "remote_as": 65002,
+        "relationship": "customer"
       },
       {
         "local_router": "R2",
         "local_as": 65001,
         "remote_router": "R6",
-        "remote_as": 65002
+        "remote_as": 65002,
+        "relationship": "provider"
       }
-    ]
+    ],
+
+    "local_preference": {
+      "customer": 200,
+      "peer": 150,
+      "provider": 50
+    },
+
+    "propagation_policy": {
+      "to_provider": ["customer"],
+      "to_peer": ["customer"],
+      "to_customer": ["customer", "peer", "provider"]
+    }
   }
 }
