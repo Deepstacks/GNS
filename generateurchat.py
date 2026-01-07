@@ -66,24 +66,36 @@ def configurer_igp(as_data, interfaces, router_id, redistribute=False):
     return ""
 
 
-def configurer_bgp(asn, router_id, ibgp_neighbors, ebgp_neighbors, redistribute=False):
+def configurer_bgp(asn, router_id, ibgp_neighbors, ebgp_neighbors, redistribute=False, bgp_settings=None):
     if not ibgp_neighbors and not ebgp_neighbors:
         return ""
 
-    config = f"""router bgp {asn}
+    config = configurer_bgp_policies(bgp_settings)
+
+    config += f"""router bgp {asn}
  bgp router-id {router_id}
  bgp log-neighbor-changes
 """
 
+    # iBGP neighbors
     for neighbor in ibgp_neighbors:
         config += f""" neighbor {neighbor} remote-as {asn}
  neighbor {neighbor} update-source Loopback0
  neighbor {neighbor} next-hop-self
+ neighbor {neighbor} send-community
 """
 
+    # eBGP neighbors with policies
     for neighbor in ebgp_neighbors:
+        relation = neighbor["relationship"]
+        policy = RELATION_POLICY[relation]
+
         config += f""" neighbor {neighbor['ip']} remote-as {neighbor['remote_as']}
+ neighbor {neighbor['ip']} route-map {policy['rm_in']} in
 """
+
+        if policy["rm_out"]:
+            config += f" neighbor {neighbor['ip']} route-map {policy['rm_out']} out\n"
 
     if redistribute:
         config += " redistribute connected\n"
@@ -91,9 +103,95 @@ def configurer_bgp(asn, router_id, ibgp_neighbors, ebgp_neighbors, redistribute=
     return config + "!\n"
 
 
+# Policies mapping for relationships
+RELATION_POLICY = {
+    "customer": {"rm_in": "SET_LOCALPREF_200", "rm_out": None},
+    "peer": {"rm_in": "SET_LOCALPREF_150", "rm_out": None},
+    "provider": {"rm_in": "SET_LOCALPREF_50", "rm_out": None}
+}
+
+
+def configurer_bgp_policies(bgp_settings=None):
+    """Génère des route-maps simples pour régler local-preference based on relationship or bgp_settings."""
+    config = ""
+    if bgp_settings and "local_preference" in bgp_settings:
+        # Generate route-maps from provided local_preference mapping
+        for rel, lp in bgp_settings["local_preference"].items():
+            rm_name = f"SET_LOCALPREF_{lp}"
+            config += f"""route-map {rm_name} permit 10
+ set local-preference {lp}
+!
+"""
+    else:
+        # Defaults
+        config += """route-map SET_LOCALPREF_200 permit 10
+ set local-preference 200
+!
+route-map SET_LOCALPREF_150 permit 10
+ set local-preference 150
+!
+route-map SET_LOCALPREF_50 permit 10
+ set local-preference 50
+!
+"""
+    return config
+
+
 # =========================
 # LOGIQUE INTENT
 # =========================
+
+def assembler_configuration(router_name, intent):
+    """Assemble la configuration complète pour un routeur donné en s'appuyant sur le fichier d'intent."""
+    as_data = get_router_as(router_name, intent)
+    if not as_data:
+        raise ValueError(f"Router {router_name} not found in intent")
+
+    router_id = get_router_loopback(router_name, intent)
+    interfaces = get_router_interfaces(router_name, intent)
+
+    cfg = ""
+    cfg += creer_entete(router_name)
+    cfg += configurer_loopback(router_id)
+    cfg += configurer_interfaces(interfaces)
+
+    # IGP
+    redistribute_igp = False
+    cfg += configurer_igp(as_data, interfaces, router_id, redistribute=redistribute_igp)
+
+    # BGP
+    asn = as_data.get("asn")
+
+    # iBGP neighbors (full-mesh using loopbacks)
+    ibgp_neighbors = []
+    ibgp = as_data.get("ibgp", {})
+    if ibgp.get("type") == "full-mesh":
+        for r in as_data.get("routers", []):
+            if r["name"] != router_name:
+                ibgp_neighbors.append(get_router_loopback(r["name"], intent))
+
+    # eBGP neighbors: scan intent['bgp']['ebgp_peers'] where local_router == router_name
+    ebgp_neighbors = []
+    for peer in intent.get("bgp", {}).get("ebgp_peers", []):
+        if peer.get("local_router") == router_name:
+            nbr = {
+                "ip": get_router_loopback(peer.get("remote_router"), intent),
+                "remote_as": peer.get("remote_as"),
+                "relationship": peer.get("relationship")
+            }
+            ebgp_neighbors.append(nbr)
+        elif peer.get("remote_router") == router_name:
+            # Peer defined from the other side
+            nbr = {
+                "ip": get_router_loopback(peer.get("local_router"), intent),
+                "remote_as": peer.get("local_as"),
+                "relationship": peer.get("relationship")
+            }
+            ebgp_neighbors.append(nbr)
+
+    cfg += configurer_bgp(asn, router_id, ibgp_neighbors, ebgp_neighbors, redistribute=False, bgp_settings=intent.get("bgp"))
+
+    return cfg
 
 def get_router_as(router_name, intent):
     for as_data in intent["autonomous_systems"]:
