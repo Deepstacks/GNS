@@ -1,45 +1,33 @@
 {
   "network_name": "Multi-AS-Network",
+  "project_settings": {
+    "output_folder": "output"
+  },
 
   "autonomous_systems": [
     {
       "name": "AS_X",
       "asn": 65001,
-      "igp": {
-        "protocol": "RIP",
-        "version": 2
-      },
+      "igp": { "protocol": "RIP", "version": 2 },
       "routers": [
         { "name": "R1", "loopback": "1.1.1.1/32" },
         { "name": "R2", "loopback": "2.2.2.2/32" },
         { "name": "R3", "loopback": "3.3.3.3/32" },
         { "name": "R4", "loopback": "4.4.4.4/32" }
       ],
-      "ibgp": {
-        "type": "full-mesh",
-        "update_source": "loopback",
-        "send_community": true
-      }
+      "ibgp": { "type": "full-mesh", "update_source": "loopback", "send_community": true }
     },
     {
       "name": "AS_Y",
       "asn": 65002,
-      "igp": {
-        "protocol": "OSPF",
-        "process_id": 1,
-        "area": 0
-      },
+      "igp": { "protocol": "OSPF", "process_id": 1, "area": 0 },
       "routers": [
         { "name": "R5", "loopback": "5.5.5.5/32" },
         { "name": "R6", "loopback": "6.6.6.6/32" },
         { "name": "R7", "loopback": "7.7.7.7/32" },
         { "name": "R8", "loopback": "8.8.8.8/32" }
       ],
-      "ibgp": {
-        "type": "full-mesh",
-        "update_source": "loopback",
-        "send_community": true
-      }
+      "ibgp": { "type": "full-mesh", "update_source": "loopback", "send_community": true }
     }
   ],
 
