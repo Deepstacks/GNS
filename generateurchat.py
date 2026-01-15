@@ -115,17 +115,22 @@ hostname {hostname}
 def configurer_loopback(loopback_ip):
     return f"""interface Loopback0
  ip address {loopback_ip} 255.255.255.255
-!
+!   
 """
 
-def configurer_interfaces(interfaces):
+# Ajout de protocol_igp pour savoir si on applique le coût OSPF
+def configurer_interfaces(interfaces, protocol_igp):
     cfg = ""
     for iface in interfaces:
         cfg += f"""interface {iface['name']}
  ip address {iface['ip']} {iface['mask']}
- no shutdown
-!
 """
+        #  Application de la métrique si présente et si OSPF
+        metric = iface.get("ospf_metric")
+        if protocol_igp == "OSPF" and metric:
+            cfg += f" ip ospf cost {metric}\n"
+
+        cfg += " no shutdown\n!\n"
     return cfg
 
 # =========================================================
@@ -267,17 +272,25 @@ def get_router_loopback(router_name, intent):
                 return r["loopback"].split("/")[0]
     return None
 
+# Extraction de la métrique OSPF depuis le lien (si possible)
 def get_router_interfaces(router_name, intent):
     interfaces = []
     for link in intent.get("links", []):
+        # On récupère la métrique du lien si elle existe
+        metric = link.get("ospf_metric")
+
         for ep in link.get("endpoints", []):
             if ep.get("device") == router_name:
                 ip, mask = ep["ip"].split("/")
-                interfaces.append({
+                iface_data = {
                     "name": ep["interface"],
                     "ip": ip,
                     "mask": mask_to_dotted(mask)
-                })
+                }
+                # Si une métrique est définie sur le lien, on l'ajoute à l'interface
+                if metric:
+                    iface_data["ospf_metric"] = metric
+                interfaces.append(iface_data)
     return interfaces
 
 def collect_ebgp_neighbors(router_name: str, intent: dict):
@@ -326,7 +339,7 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
     return neighbors
 
 # =========================================================
-# ASSEMBLER CONFIGURATION COMPLÈTE
+# ASSEMBLER CONFIGURATION COMPLÈTE
 # =========================================================
 
 def assembler_configuration(router_name, intent):
@@ -356,7 +369,8 @@ def assembler_configuration(router_name, intent):
     cfg = ""
     cfg += creer_entete(router_name)
     cfg += configurer_loopback(loopback_ip)
-    cfg += configurer_interfaces(interfaces)
+    # On passe le protocole à configurer_interfaces
+    cfg += configurer_interfaces(interfaces, as_data["igp"]["protocol"].upper())
     cfg += configurer_igp(as_data, interfaces, loopback_ip)
     cfg += configurer_bgp(as_data["asn"], loopback_ip, ibgp_neighbors, ebgp_neighbors, intent)
     return cfg
