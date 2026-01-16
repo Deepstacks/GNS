@@ -10,6 +10,10 @@ def mask_to_dotted(mask):
     bits = (0xffffffff >> (32 - mask)) << (32 - mask)
     return ".".join(str((bits >> i) & 0xff) for i in [24, 16, 8, 0])
 
+def dotted_to_prefixlen(mask_dotted: str) -> int:
+    """Convertit un masque décimal pointé en prefixlen."""
+    return ipaddress.IPv4Network(f"0.0.0.0/{mask_dotted}").prefixlen
+
 def wildcard_from_prefixlen(prefixlen: int) -> str:
     """Ex: /30 -> 0.0.0.3"""
     host_bits = 32 - int(prefixlen)
@@ -66,16 +70,15 @@ def infer_reverse_relationship(rel: str) -> str:
 
 def validate_intent_minimal(intent: dict):
     """
-    Vérifications utiles pour valider parties 2–3 :
-    - Tous les routeurs ont au moins 1 interface dans links (sinon IGP/BGP impossibles)
+    Vérifications utiles :
+    - Tous les routeurs ont au moins 1 interface dans links
     - Chaque ebgp_peers a bien un lien correspondant dans links
+    - Les AS ont un champ 'igp' OU bien on tolère les AS terminaux (1 routeur) avec OSPF minimal
     """
-    # routeurs connus
     routers = []
     for a in intent.get("autonomous_systems", []):
         routers += [r["name"] for r in a.get("routers", [])]
 
-    # interfaces par routeur
     seen = {r: 0 for r in routers}
     for link in intent.get("links", []):
         for ep in link.get("endpoints", []):
@@ -86,11 +89,10 @@ def validate_intent_minimal(intent: dict):
     isolated = [r for r, n in seen.items() if n == 0]
     if isolated:
         raise ValueError(
-            "Topo incomplète: ces routeurs n'ont aucune interface dans 'links' "
-            f"(donc IGP/iBGP impossibles) : {', '.join(isolated)}"
+            "Topo incomplète: ces routeurs n'ont aucune interface dans 'links' : "
+            + ", ".join(isolated)
         )
 
-    # ebgp peers -> link must exist
     for p in intent.get("bgp", {}).get("ebgp_peers", []):
         lr = p["local_router"]
         rr = p["remote_router"]
@@ -134,10 +136,16 @@ def configurer_interfaces(interfaces):
 
 def configurer_igp(as_data, interfaces, loopback_ip):
     """
-    - OSPF : annonce toutes les interfaces + la loopback0 (host route)
-    - RIP  : network classful + (option) redistribute connected pour annoncer loopback
+    - RIP  : network classful + redistribute connected (pour loopback)
+    - OSPF : annonce toutes les interfaces + loopback /32
+    - AS terminaux: si 'igp' absent, on ne met pas d'IGP (OK si 1 routeur)
     """
-    igp = as_data["igp"]["protocol"].upper()
+    igp_data = as_data.get("igp")
+    if not igp_data:
+        # AS terminal typique (1 routeur) : pas besoin d’IGP
+        return ""
+
+    igp = igp_data["protocol"].upper()
 
     if igp == "RIP":
         cfg = """router rip
@@ -149,27 +157,22 @@ def configurer_igp(as_data, interfaces, loopback_ip):
             majors.add(classful_major_network(iface["ip"]))
         for net in sorted(majors):
             cfg += f" network {net}\n"
-
-        # IMPORTANT : en RIP, pour annoncer la loopback /32 facilement :
-        # redistribute connected (acceptable pour un projet, simple, robuste)
         cfg += " redistribute connected\n"
         return cfg + "!\n"
 
     if igp == "OSPF":
-        process_id = as_data["igp"]["process_id"]
-        area = as_data["igp"]["area"]
+        process_id = igp_data["process_id"]
+        area = igp_data["area"]
         cfg = f"""router ospf {process_id}
  router-id {loopback_ip}
 """
         for iface in interfaces:
-            # On calcule prefixlen depuis le masque dotted
             mask = iface["mask"]
-            prefixlen = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+            prefixlen = dotted_to_prefixlen(mask)
             net = ipaddress.IPv4Interface(f"{iface['ip']}/{prefixlen}").network
             wildcard = wildcard_from_prefixlen(prefixlen)
             cfg += f" network {net.network_address} {wildcard} area {area}\n"
 
-        # annonce explicite de la loopback en host route (équivalent "manuel")
         cfg += f" network {loopback_ip} 0.0.0.0 area {area}\n"
         return cfg + "!\n"
 
@@ -180,9 +183,6 @@ def configurer_igp(as_data, interfaces, loopback_ip):
 # =========================================================
 
 def configurer_bgp_policies(intent):
-    """
-    communities + local-pref + propagation_policy
-    """
     bgp = intent["bgp"]
     communities = bgp["communities"]
     local_pref = bgp["local_preference"]
@@ -206,7 +206,7 @@ def configurer_bgp_policies(intent):
 
     # OUT policies from propagation_policy
     for to_key, allowed_roles in policy.items():
-        target = to_key.replace("to_", "").upper()   # CUSTOMER/PEER/PROVIDER
+        target = to_key.replace("to_", "").upper()  # CUSTOMER/PEER/PROVIDER
         listname = f"TO_{target}"
         for r in allowed_roles:
             cfg += f"ip community-list standard {listname} permit {communities[r]}\n"
@@ -217,10 +217,38 @@ def configurer_bgp_policies(intent):
 route-map RM-OUT-TO-{target} deny 20
 !
 """
-
     return cfg
 
-def configurer_bgp(asn, router_id, ibgp_neighbors, ebgp_neighbors, intent):
+# =========================================================
+# BGP ORIGINATION (FIX PRINCIPAL)
+# =========================================================
+
+def collect_bgp_origins(router_name: str, intent: dict, loopback_ip: str) -> list:
+    """
+    Retourne la liste des préfixes à ORIGINATE en BGP sur CE routeur.
+    - Toujours: loopback /32 (pour avoir des routes à propager)
+    - Optionnel: intent["bgp"]["origins"][router_name] = ["X.X.X.X/YY", ...]
+    """
+    origins = [f"{loopback_ip}/32"]
+
+    extra = intent.get("bgp", {}).get("origins", {}).get(router_name, [])
+    for cidr in extra:
+        origins.append(cidr)
+
+    # dédup
+    return sorted(set(origins))
+
+def render_bgp_network_statements(origins: list) -> str:
+    """
+    Rend des 'network A.B.C.D mask W.X.Y.Z'
+    """
+    lines = ""
+    for cidr in origins:
+        net = ipaddress.IPv4Network(cidr, strict=False)
+        lines += f" network {net.network_address} mask {net.netmask}\n"
+    return lines
+
+def configurer_bgp(asn, router_id, router_name, loopback_ip, ibgp_neighbors, ebgp_neighbors, intent):
     if not ibgp_neighbors and not ebgp_neighbors:
         return ""
 
@@ -231,6 +259,10 @@ def configurer_bgp(asn, router_id, ibgp_neighbors, ebgp_neighbors, intent):
  bgp log-neighbor-changes
 """
 
+    # ✅ ORIGINATION : on annonce au moins la loopback /32 (et éventuellement des LANs)
+    origins = collect_bgp_origins(router_name, intent, loopback_ip)
+    cfg += render_bgp_network_statements(origins)
+
     # iBGP full mesh
     for n in ibgp_neighbors:
         cfg += f""" neighbor {n} remote-as {asn}
@@ -239,7 +271,7 @@ def configurer_bgp(asn, router_id, ibgp_neighbors, ebgp_neighbors, intent):
  neighbor {n} send-community
 """
 
-    # eBGP neighbors with 3.4 policies
+    # eBGP neighbors with policies
     for n in ebgp_neighbors:
         role = n["relationship"].lower()
         peer_ip = n["ip"]
@@ -281,23 +313,14 @@ def get_router_interfaces(router_name, intent):
     return interfaces
 
 def collect_ebgp_neighbors(router_name: str, intent: dict):
-    """
-    Retourne la liste des voisins eBGP pour router_name.
-    - Supporte:
-      (a) entrées symétriques explicites dans ebgp_peers
-      (b) ou entrées à sens unique => on auto-génère le reverse
-    """
     neighbors = []
     peers = intent.get("bgp", {}).get("ebgp_peers", [])
-
-    # Build a quick set to know if reverse is already declared
     declared = {(p["local_router"], p["remote_router"]) for p in peers}
 
     for p in peers:
         lr = p["local_router"]
         rr = p["remote_router"]
 
-        # cas 1: l'entrée me concerne en tant que local_router
         if lr == router_name:
             remote_ip = find_link_peer_ip(lr, rr, intent)
             if remote_ip is None:
@@ -308,15 +331,13 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
                 "relationship": p["relationship"]
             })
 
-        # cas 2: reverse auto si je suis le remote_router et que reverse pas déclaré
         if rr == router_name and (rr, lr) not in declared:
-            # je dois peer avec lr
             remote_ip = find_link_peer_ip(rr, lr, intent)
             if remote_ip is None:
                 raise ValueError(f"Impossible de trouver le lien {rr}<->{lr} dans 'links'.")
             remote_as = get_router_asn(lr, intent)
             if remote_as is None:
-                raise ValueError(f"Impossible de déduire l'ASN de {lr} (routeur introuvable).")
+                raise ValueError(f"Impossible de déduire l'ASN de {lr}.")
             neighbors.append({
                 "ip": remote_ip,
                 "remote_as": remote_as,
@@ -330,7 +351,6 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
 # =========================================================
 
 def assembler_configuration(router_name, intent):
-    # robustesse: valide topo/peers
     validate_intent_minimal(intent)
 
     as_data = get_router_as(router_name, intent)
@@ -343,14 +363,12 @@ def assembler_configuration(router_name, intent):
 
     interfaces = get_router_interfaces(router_name, intent)
 
-    # iBGP neighbors (full-mesh)
     ibgp_neighbors = []
     if as_data.get("ibgp", {}).get("type") == "full-mesh":
         for r in as_data.get("routers", []):
             if r["name"] != router_name:
                 ibgp_neighbors.append(get_router_loopback(r["name"], intent))
 
-    # eBGP neighbors (symétrique auto)
     ebgp_neighbors = collect_ebgp_neighbors(router_name, intent)
 
     cfg = ""
@@ -358,5 +376,5 @@ def assembler_configuration(router_name, intent):
     cfg += configurer_loopback(loopback_ip)
     cfg += configurer_interfaces(interfaces)
     cfg += configurer_igp(as_data, interfaces, loopback_ip)
-    cfg += configurer_bgp(as_data["asn"], loopback_ip, ibgp_neighbors, ebgp_neighbors, intent)
+    cfg += configurer_bgp(as_data["asn"], loopback_ip, router_name, loopback_ip, ibgp_neighbors, ebgp_neighbors, intent)
     return cfg

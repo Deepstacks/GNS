@@ -1,5 +1,5 @@
 VALIDATION GUIDE (Parts 2–3)
-Generated on: 2026-01-15T09:29:09
+Generated on: 2026-01-16T17:06:22
 
 A) IGP validation
 - RIP (AS_X):

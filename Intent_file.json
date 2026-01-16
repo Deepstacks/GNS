@@ -9,6 +9,9 @@
       "name": "AS_X",
       "asn": 65001,
       "igp": { "protocol": "RIP", "version": 2 },
+
+      "bgp_advertise": { "loopbacks": true },
+
       "routers": [
         { "name": "R1", "loopback": "1.1.1.1/32" },
         { "name": "R2", "loopback": "2.2.2.2/32" },
@@ -17,10 +20,14 @@
       ],
       "ibgp": { "type": "full-mesh", "update_source": "loopback", "send_community": true }
     },
+
     {
       "name": "AS_Y",
       "asn": 65002,
       "igp": { "protocol": "OSPF", "process_id": 1, "area": 0 },
+
+      "bgp_advertise": { "loopbacks": true },
+
       "routers": [
         { "name": "R5", "loopback": "5.5.5.5/32" },
         { "name": "R6", "loopback": "6.6.6.6/32" },
@@ -33,18 +40,24 @@
     {
       "name": "AS_TERM_CUSTOMER",
       "asn": 65003,
+      "igp": { "protocol": "OSPF", "process_id": 1, "area": 0 },
+      "advertise_loopback": true,
       "routers": [
         { "name": "C1", "loopback": "10.10.10.1/32" }
       ]
-    },
+    }
+
+
     {
       "name": "AS_TERM_PEER",
       "asn": 65004,
+      "igp": { "protocol": "OSPF", "process_id": 1, "area": 0 },
+      "advertise_loopback": true,
       "routers": [
-        { "name": "P1", "loopback": "20.20.20.1/32" }
+       { "name": "P1", "loopback": "20.20.20.1/32" }
       ]
     }
-  ],
+
 
   "links": [
     {
@@ -100,14 +113,14 @@
 
     {
       "endpoints": [
-        { "device": "R1", "interface": "FastEthernet0/1", "ip": "192.168.100.1/30" },
-        { "device": "C1", "interface": "FastEthernet0/0", "ip": "192.168.100.2/30" }
+        { "device": "R1", "interface": "GigabitEthernet1/0", "ip": "192.168.100.1/30" },
+        { "device": "C1", "interface": "GigabitEthernet1/0", "ip": "192.168.100.2/30" }
       ]
     },
     {
       "endpoints": [
-        { "device": "R2", "interface": "FastEthernet0/1", "ip": "192.168.200.1/30" },
-        { "device": "P1", "interface": "FastEthernet0/0", "ip": "192.168.200.2/30" }
+        { "device": "R2", "interface": "GigabitEthernet3/0", "ip": "192.168.200.1/30" },
+        { "device": "P1", "interface": "GigabitEthernet3/0", "ip": "192.168.200.2/30" }
       ]
     }
   ],
@@ -132,57 +145,17 @@
     },
 
     "ebgp_peers": [
-      {
-        "local_router": "R3",
-        "remote_router": "R5",
-        "remote_as": 65002,
-        "relationship": "customer"
-      },
-      {
-        "local_router": "R5",
-        "remote_router": "R3",
-        "remote_as": 65001,
-        "relationship": "provider"
-      },
+      { "local_router": "R3", "remote_router": "R5", "remote_as": 65002, "relationship": "customer" },
+      { "local_router": "R5", "remote_router": "R3", "remote_as": 65001, "relationship": "provider" },
 
-      {
-        "local_router": "R4",
-        "remote_router": "R6",
-        "remote_as": 65002,
-        "relationship": "provider"
-      },
-      {
-        "local_router": "R6",
-        "remote_router": "R4",
-        "remote_as": 65001,
-        "relationship": "customer"
-      },
+      { "local_router": "R4", "remote_router": "R6", "remote_as": 65002, "relationship": "provider" },
+      { "local_router": "R6", "remote_router": "R4", "remote_as": 65001, "relationship": "customer" },
 
-      {
-        "local_router": "R1",
-        "remote_router": "C1",
-        "remote_as": 65003,
-        "relationship": "customer"
-      },
-      {
-        "local_router": "C1",
-        "remote_router": "R1",
-        "remote_as": 65001,
-        "relationship": "provider"
-      },
+      { "local_router": "R1", "remote_router": "C1", "remote_as": 65003, "relationship": "customer" },
+      { "local_router": "C1", "remote_router": "R1", "remote_as": 65001, "relationship": "provider" },
 
-      {
-        "local_router": "R2",
-        "remote_router": "P1",
-        "remote_as": 65004,
-        "relationship": "peer"
-      },
-      {
-        "local_router": "P1",
-        "remote_router": "R2",
-        "remote_as": 65001,
-        "relationship": "peer"
-      }
+      { "local_router": "R2", "remote_router": "P1", "remote_as": 65004, "relationship": "peer" },
+      { "local_router": "P1", "remote_router": "R2", "remote_as": 65001, "relationship": "peer" }
     ]
   }
 }
