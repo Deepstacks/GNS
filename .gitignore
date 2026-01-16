@@ -1,0 +1,16 @@
+# Fichiers systèmes Mac et Windows
+.DS_Store
+Thumbs.db
+
+# Dossiers de dépendances (ex: Node.js)
+node_modules/
+
+# Fichiers de configuration perso / Sécurité (Mots de passe)
+.env
+config_local.py
+
+# Dossiers de compilation / Build
+dist/
+build/
+__pycache__/
+*.log
