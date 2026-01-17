@@ -349,10 +349,13 @@ def assembler_configuration(router_name, intent):
     # eBGP neighbors
     ebgp_neighbors = collect_ebgp_neighbors(router_name, intent)
 
+    # Extract IGP protocol for interface configuration
+    protocol_igp = as_data["igp"]["protocol"].upper()
+
     cfg = ""
     cfg += creer_entete(router_name)
     cfg += configurer_loopback(loopback_ip)
-    cfg += configurer_interfaces(interfaces)
+    cfg += configurer_interfaces(interfaces, protocol_igp)
 
     # certains AS terminaux auront un igp minimal
     # (donc il faut bien que "igp" existe dans le JSON)
