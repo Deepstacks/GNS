@@ -10,10 +10,6 @@ def mask_to_dotted(mask):
     bits = (0xffffffff >> (32 - mask)) << (32 - mask)
     return ".".join(str((bits >> i) & 0xff) for i in [24, 16, 8, 0])
 
-def dotted_to_prefixlen(mask_dotted: str) -> int:
-    """Convertit un masque décimal pointé en prefixlen."""
-    return ipaddress.IPv4Network(f"0.0.0.0/{mask_dotted}").prefixlen
-
 def wildcard_from_prefixlen(prefixlen: int) -> str:
     """Ex: /30 -> 0.0.0.3"""
     host_bits = 32 - int(prefixlen)
@@ -70,10 +66,9 @@ def infer_reverse_relationship(rel: str) -> str:
 
 def validate_intent_minimal(intent: dict):
     """
-    Vérifications utiles :
-    - Tous les routeurs ont au moins 1 interface dans links
+    Vérifications utiles pour valider parties 2–3 :
+    - Tous les routeurs ont au moins 1 interface dans links (sinon IGP/BGP impossibles)
     - Chaque ebgp_peers a bien un lien correspondant dans links
-    - Les AS ont un champ 'igp' OU bien on tolère les AS terminaux (1 routeur) avec OSPF minimal
     """
     routers = []
     for a in intent.get("autonomous_systems", []):
@@ -89,8 +84,8 @@ def validate_intent_minimal(intent: dict):
     isolated = [r for r, n in seen.items() if n == 0]
     if isolated:
         raise ValueError(
-            "Topo incomplète: ces routeurs n'ont aucune interface dans 'links' : "
-            + ", ".join(isolated)
+            "Topo incomplète: ces routeurs n'ont aucune interface dans 'links' "
+            f"(donc IGP/iBGP impossibles) : {', '.join(isolated)}"
         )
 
     for p in intent.get("bgp", {}).get("ebgp_peers", []):
@@ -117,22 +112,17 @@ hostname {hostname}
 def configurer_loopback(loopback_ip):
     return f"""interface Loopback0
  ip address {loopback_ip} 255.255.255.255
-!   
+!
 """
 
-# Ajout de protocol_igp pour savoir si on applique le coût OSPF
-def configurer_interfaces(interfaces, protocol_igp):
+def configurer_interfaces(interfaces):
     cfg = ""
     for iface in interfaces:
         cfg += f"""interface {iface['name']}
  ip address {iface['ip']} {iface['mask']}
+ no shutdown
+!
 """
-        #  Application de la métrique si présente et si OSPF
-        metric = iface.get("ospf_metric")
-        if protocol_igp == "OSPF" and metric:
-            cfg += f" ip ospf cost {metric}\n"
-
-        cfg += " no shutdown\n!\n"
     return cfg
 
 # =========================================================
@@ -141,16 +131,10 @@ def configurer_interfaces(interfaces, protocol_igp):
 
 def configurer_igp(as_data, interfaces, loopback_ip):
     """
-    - RIP  : network classful + redistribute connected (pour loopback)
-    - OSPF : annonce toutes les interfaces + loopback /32
-    - AS terminaux: si 'igp' absent, on ne met pas d'IGP (OK si 1 routeur)
+    - OSPF : annonce toutes les interfaces + la loopback0 (host route)
+    - RIP  : network classful + redistribute connected pour annoncer loopback
     """
-    igp_data = as_data.get("igp")
-    if not igp_data:
-        # AS terminal typique (1 routeur) : pas besoin d’IGP
-        return ""
-
-    igp = igp_data["protocol"].upper()
+    igp = as_data["igp"]["protocol"].upper()
 
     if igp == "RIP":
         cfg = """router rip
@@ -162,18 +146,19 @@ def configurer_igp(as_data, interfaces, loopback_ip):
             majors.add(classful_major_network(iface["ip"]))
         for net in sorted(majors):
             cfg += f" network {net}\n"
+
         cfg += " redistribute connected\n"
         return cfg + "!\n"
 
     if igp == "OSPF":
-        process_id = igp_data["process_id"]
-        area = igp_data["area"]
+        process_id = as_data["igp"]["process_id"]
+        area = as_data["igp"]["area"]
         cfg = f"""router ospf {process_id}
  router-id {loopback_ip}
 """
         for iface in interfaces:
             mask = iface["mask"]
-            prefixlen = dotted_to_prefixlen(mask)
+            prefixlen = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
             net = ipaddress.IPv4Interface(f"{iface['ip']}/{prefixlen}").network
             wildcard = wildcard_from_prefixlen(prefixlen)
             cfg += f" network {net.network_address} {wildcard} area {area}\n"
@@ -195,12 +180,10 @@ def configurer_bgp_policies(intent):
 
     cfg = ""
 
-    # community-lists roles
     for role, comm in communities.items():
         cfg += f"ip community-list standard {role.upper()} permit {comm}\n"
     cfg += "\n"
 
-    # IN policies
     for role, comm in communities.items():
         lp = local_pref[role]
         cfg += f"""route-map RM-IN-{role.upper()} permit 10
@@ -209,9 +192,8 @@ def configurer_bgp_policies(intent):
 !
 """
 
-    # OUT policies from propagation_policy
     for to_key, allowed_roles in policy.items():
-        target = to_key.replace("to_", "").upper()  # CUSTOMER/PEER/PROVIDER
+        target = to_key.replace("to_", "").upper()
         listname = f"TO_{target}"
         for r in allowed_roles:
             cfg += f"ip community-list standard {listname} permit {communities[r]}\n"
@@ -222,38 +204,13 @@ def configurer_bgp_policies(intent):
 route-map RM-OUT-TO-{target} deny 20
 !
 """
+
     return cfg
 
-# =========================================================
-# BGP ORIGINATION (FIX PRINCIPAL)
-# =========================================================
-
-def collect_bgp_origins(router_name: str, intent: dict, loopback_ip: str) -> list:
+def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, intent):
     """
-    Retourne la liste des préfixes à ORIGINATE en BGP sur CE routeur.
-    - Toujours: loopback /32 (pour avoir des routes à propager)
-    - Optionnel: intent["bgp"]["origins"][router_name] = ["X.X.X.X/YY", ...]
+    as_data ajouté pour pouvoir activer (optionnellement) l'annonce de la loopback en BGP.
     """
-    origins = [f"{loopback_ip}/32"]
-
-    extra = intent.get("bgp", {}).get("origins", {}).get(router_name, [])
-    for cidr in extra:
-        origins.append(cidr)
-
-    # dédup
-    return sorted(set(origins))
-
-def render_bgp_network_statements(origins: list) -> str:
-    """
-    Rend des 'network A.B.C.D mask W.X.Y.Z'
-    """
-    lines = ""
-    for cidr in origins:
-        net = ipaddress.IPv4Network(cidr, strict=False)
-        lines += f" network {net.network_address} mask {net.netmask}\n"
-    return lines
-
-def configurer_bgp(asn, router_id, router_name, loopback_ip, ibgp_neighbors, ebgp_neighbors, intent):
     if not ibgp_neighbors and not ebgp_neighbors:
         return ""
 
@@ -263,10 +220,6 @@ def configurer_bgp(asn, router_id, router_name, loopback_ip, ibgp_neighbors, ebg
  bgp router-id {router_id}
  bgp log-neighbor-changes
 """
-
-    # ✅ ORIGINATION : on annonce au moins la loopback /32 (et éventuellement des LANs)
-    origins = collect_bgp_origins(router_name, intent, loopback_ip)
-    cfg += render_bgp_network_statements(origins)
 
     # iBGP full mesh
     for n in ibgp_neighbors:
@@ -285,6 +238,11 @@ def configurer_bgp(asn, router_id, router_name, loopback_ip, ibgp_neighbors, ebg
  neighbor {peer_ip} route-map RM-IN-{role.upper()} in
  neighbor {peer_ip} route-map RM-OUT-TO-{role.upper()} out
 """
+
+    # ✅ NOUVEAU : pour AS terminaux, annoncer la loopback en BGP
+    if as_data.get("advertise_loopback"):
+        cfg += f" network {router_id} mask 255.255.255.255\n"
+
     return cfg + "!\n"
 
 # =========================================================
@@ -304,25 +262,17 @@ def get_router_loopback(router_name, intent):
                 return r["loopback"].split("/")[0]
     return None
 
-# Extraction de la métrique OSPF depuis le lien (si possible)
 def get_router_interfaces(router_name, intent):
     interfaces = []
     for link in intent.get("links", []):
-        # On récupère la métrique du lien si elle existe
-        metric = link.get("ospf_metric")
-
         for ep in link.get("endpoints", []):
             if ep.get("device") == router_name:
                 ip, mask = ep["ip"].split("/")
-                iface_data = {
+                interfaces.append({
                     "name": ep["interface"],
                     "ip": ip,
                     "mask": mask_to_dotted(mask)
-                }
-                # Si une métrique est définie sur le lien, on l'ajoute à l'interface
-                if metric:
-                    iface_data["ospf_metric"] = metric
-                interfaces.append(iface_data)
+                })
     return interfaces
 
 def collect_ebgp_neighbors(router_name: str, intent: dict):
@@ -350,7 +300,7 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
                 raise ValueError(f"Impossible de trouver le lien {rr}<->{lr} dans 'links'.")
             remote_as = get_router_asn(lr, intent)
             if remote_as is None:
-                raise ValueError(f"Impossible de déduire l'ASN de {lr}.")
+                raise ValueError(f"Impossible de déduire l'ASN de {lr} (routeur introuvable).")
             neighbors.append({
                 "ip": remote_ip,
                 "remote_as": remote_as,
@@ -360,7 +310,7 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
     return neighbors
 
 # =========================================================
-# ASSEMBLER CONFIGURATION COMPLÈTE
+# ASSEMBLER CONFIGURATION COMPLETE
 # =========================================================
 
 def assembler_configuration(router_name, intent):
@@ -376,21 +326,25 @@ def assembler_configuration(router_name, intent):
 
     interfaces = get_router_interfaces(router_name, intent)
 
+    # iBGP neighbors
     ibgp_neighbors = []
     if as_data.get("ibgp", {}).get("type") == "full-mesh":
         for r in as_data.get("routers", []):
             if r["name"] != router_name:
                 ibgp_neighbors.append(get_router_loopback(r["name"], intent))
 
+    # eBGP neighbors
     ebgp_neighbors = collect_ebgp_neighbors(router_name, intent)
-
-    # Extract IGP protocol for interface configuration
-    protocol_igp = as_data["igp"]["protocol"].upper()
 
     cfg = ""
     cfg += creer_entete(router_name)
     cfg += configurer_loopback(loopback_ip)
     cfg += configurer_interfaces(interfaces)
+
+    # certains AS terminaux auront un igp minimal
+    # (donc il faut bien que "igp" existe dans le JSON)
     cfg += configurer_igp(as_data, interfaces, loopback_ip)
-    cfg += configurer_bgp(as_data["asn"], loopback_ip, router_name, loopback_ip, ibgp_neighbors, ebgp_neighbors, intent)
+
+    # ✅ appel modifié: on passe as_data
+    cfg += configurer_bgp(as_data, as_data["asn"], loopback_ip, ibgp_neighbors, ebgp_neighbors, intent)
     return cfg
