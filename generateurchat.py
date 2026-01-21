@@ -160,33 +160,20 @@ def configurer_igp(as_data, interfaces, loopback_ip):
             prefixlen = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
             net = ipaddress.IPv4Interface(f"{iface['ip']}/{prefixlen}").network
             wildcard = wildcard_from_prefixlen(prefixlen)
-            cost = iface.get("cost", 10)
+            # Appliquer un coût OSPF si défini dans l'intent
+            cost = iface.get("cost", 10)  # Valeur par défaut de 10 si pas spécifié
             cfg += f" network {net.network_address} {wildcard} area {area}\n"
-        
-        # Loopback en dernier
+            cfg += f" ip ospf cost {cost}\n"  # Application de la métrique OSPF
         cfg += f" network {loopback_ip} 0.0.0.0 area {area}\n"
-        
-        # Coûts OSPF par interface (si définis)
-        for iface in interfaces:
-            if "cost" in iface:
-                cfg += f"!\ninterface {iface['name']}\n ip ospf cost {iface['cost']}\n"
-        
         return cfg + "!\n"
 
     return ""
 
 # =========================================================
-# BGP POLICIES (PARTIE 3.4) - VERSION AMÉLIORÉE
+# BGP POLICIES (PARTIE 3.4)
 # =========================================================
 
 def configurer_bgp_policies(intent):
-    """
-    Configure les filtres BGP avec:
-    - Communities pour tagging
-    - Local preference
-    - Filtres de propagation
-    - Filtres anti-bogon (sécurité de base)
-    """
     bgp = intent["bgp"]
     communities = bgp["communities"]
     local_pref = bgp["local_preference"]
@@ -194,62 +181,38 @@ def configurer_bgp_policies(intent):
 
     cfg = ""
 
-    # ============================================
-    # SÉCURITÉ: Filtres anti-bogon/privés
-    # ============================================
-    cfg += """! Filtres de sécurité - Bloquer routes privées/bogon
-ip prefix-list BOGONS deny 0.0.0.0/8 le 32
-ip prefix-list BOGONS deny 10.0.0.0/8 le 32
-ip prefix-list BOGONS deny 172.16.0.0/12 le 32
-ip prefix-list BOGONS deny 192.168.0.0/16 le 32
-ip prefix-list BOGONS deny 224.0.0.0/4 le 32
-ip prefix-list BOGONS permit 0.0.0.0/0 le 32
-!
-"""
-
-    # ============================================
-    # Définir les community-lists
-    # ============================================
+    # Définir les communautés BGP
     for role, comm in communities.items():
         cfg += f"ip community-list standard {role.upper()} permit {comm}\n"
-    cfg += "!\n"
+    cfg += "\n"
 
-    # ============================================
-    # Route-maps IN: Tagging + Local Preference
-    # ============================================
+    # Appliquer les route-maps pour chaque rôle BGP
     for role, comm in communities.items():
         lp = local_pref[role]
         cfg += f"""route-map RM-IN-{role.upper()} permit 10
- match ip address prefix-list BOGONS
  set community {comm} additive
  set local-preference {lp}
 !
 """
 
-    # ============================================
-    # Route-map pour routes locales (AMÉLIORÉ)
-    # ============================================
+    # Route-map pour les annonces locales
     cfg += f"""route-map RM-SET-LOCAL permit 10
  set local-preference {local_pref['customer']}
  set community {communities['customer']} additive
 !
 """
 
-    # ============================================
-    # Route-maps OUT: Filtrage par propagation policy
-    # ============================================
+    # Configuration de propagation
     for to_key, allowed_roles in policy.items():
         target = to_key.replace("to_", "").upper()
         listname = f"TO_{target}"
-        
-        # Créer community-list pour ce target
         for r in allowed_roles:
             cfg += f"ip community-list standard {listname} permit {communities[r]}\n"
         cfg += "\n"
 
-        # Route-map simplifié (pas de deny explicite - implicit deny suffit)
         cfg += f"""route-map RM-OUT-TO-{target} permit 10
  match community {listname}
+route-map RM-OUT-TO-{target} deny 20
 !
 """
 
@@ -258,12 +221,10 @@ ip prefix-list BOGONS permit 0.0.0.0/0 le 32
 def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, intent):
     """
     Configuration complète de BGP avec gestion des route-maps et des politiques de propagation.
-    VERSION AMÉLIORÉE avec meilleure gestion des routes locales.
     """
     if not ibgp_neighbors and not ebgp_neighbors:
         return ""
 
-    # Générer les policies en premier
     cfg = configurer_bgp_policies(intent)
 
     cfg += f"""router bgp {asn}
@@ -271,9 +232,7 @@ def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, inte
  bgp log-neighbor-changes
 """
 
-    # ============================================
     # Configuration iBGP en full-mesh
-    # ============================================
     for n in ibgp_neighbors:
         cfg += f""" neighbor {n} remote-as {asn}
  neighbor {n} update-source Loopback0
@@ -282,9 +241,7 @@ def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, inte
  neighbor {n} soft-reconfiguration inbound
 """
 
-    # ============================================
     # Configuration des voisins eBGP
-    # ============================================
     for n in ebgp_neighbors:
         role = n["relationship"].lower()
         peer_ip = n["ip"]
@@ -295,16 +252,10 @@ def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, inte
  neighbor {peer_ip} soft-reconfiguration inbound
 """
 
-    # ============================================
-    # Annonces locales (AMÉLIORÉ)
-    # ============================================
-    # Annoncer la loopback avec le tag LOCAL
+    # Annonce de la loopback pour BGP
     if as_data.get("advertise_loopback"):
         cfg += f" network {router_id} mask 255.255.255.255 route-map RM-SET-LOCAL\n"
-    
-    # Note: Si vous avez d'autres réseaux à annoncer, ajoutez-les ici
-    # avec route-map RM-SET-LOCAL pour qu'ils soient aussi tagués comme "customer"
-    
+
     return cfg + "!\n"
 
 # =========================================================
@@ -330,15 +281,11 @@ def get_router_interfaces(router_name, intent):
         for ep in link.get("endpoints", []):
             if ep.get("device") == router_name:
                 ip, mask = ep["ip"].split("/")
-                iface_data = {
+                interfaces.append({
                     "name": ep["interface"],
                     "ip": ip,
                     "mask": mask_to_dotted(mask)
-                }
-                # Ajouter le coût OSPF si défini dans l'intent
-                if "cost" in ep:
-                    iface_data["cost"] = ep["cost"]
-                interfaces.append(iface_data)
+                })
     return interfaces
 
 def collect_ebgp_neighbors(router_name: str, intent: dict):
@@ -380,9 +327,6 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
 # =========================================================
 
 def assembler_configuration(router_name, intent):
-    """
-    Assemble la configuration complète d'un routeur basée sur l'intent file.
-    """
     validate_intent_minimal(intent)
 
     as_data = get_router_as(router_name, intent)
@@ -405,46 +349,10 @@ def assembler_configuration(router_name, intent):
     # eBGP neighbors
     ebgp_neighbors = collect_ebgp_neighbors(router_name, intent)
 
-    # Assembler la configuration
     cfg = ""
     cfg += creer_entete(router_name)
     cfg += configurer_loopback(loopback_ip)
     cfg += configurer_interfaces(interfaces)
     cfg += configurer_igp(as_data, interfaces, loopback_ip)
     cfg += configurer_bgp(as_data, as_data["asn"], loopback_ip, ibgp_neighbors, ebgp_neighbors, intent)
-    
-    cfg += "!\nend\n"
-    
     return cfg
-
-
-# =========================================================
-# UTILISATION EXEMPLE
-# =========================================================
-if __name__ == "__main__":
-    import json
-    
-    # Charger l'intent file
-    with open('Intent_file.json', 'r') as f:
-        intent = json.load(f)
-    
-    # Générer la config pour tous les routeurs
-    all_routers = []
-    for as_data in intent.get("autonomous_systems", []):
-        for r in as_data.get("routers", []):
-            all_routers.append(r["name"])
-    
-    # Générer et sauvegarder les configs
-    import os
-    output_dir = intent.get("project_settings", {}).get("output_folder", "output")
-    os.makedirs(output_dir, exist_ok=True)
-    
-    for router in all_routers:
-        try:
-            config = assembler_configuration(router, intent)
-            output_file = os.path.join(output_dir, f"{router}_config.txt")
-            with open(output_file, 'w') as f:
-                f.write(config)
-            print(f"✅ Configuration générée pour {router} -> {output_file}")
-        except Exception as e:
-            print(f"❌ Erreur pour {router}: {e}")
