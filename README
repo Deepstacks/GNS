@@ -40,11 +40,6 @@ route-maps basées sur communities
 ✔ Script générique et réutilisable
 🟡 Limites (assumées et acceptables)
 Pas d’OSPFv3 (IPv4 OK pour le TP)
-Mise en place d’une métrique sur les liens pour OSPF non implémentée
-Dans notre cas il n’y a pas d’intérêt particulier à le faire parce que dans notre topologie,
-il n’y a pas de multi-chemins possibles (pas de ECMP), donc OSPF choisit toujours le même chemin.
-Mais c’est une fonctionnalité qui pourrait être ajoutée facilement.
-➡️ À mentionner dans le rapport, expliquer pourquoi sa ne fonctionne pas ici.
 Redistribution simplifiée
 Pas d’adressage automatique (optionnel)
 ➡️ À mentionner dans le rapport, pas un défaut
