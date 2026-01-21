@@ -39,10 +39,10 @@ def find_link_peer_ip(local_router: str, remote_router: str, intent: dict):
     et renvoie l'IP (sans /mask) du remote_router sur ce lien.
     """
     for link in intent.get("links", []):
-        eps = link.get("endpoints", [])
-        devs = {ep.get("device") for ep in eps}
+        endpoints = link.get("endpoints", [])
+        devs = {ep.get("device") for ep in endpoints}
         if local_router in devs and remote_router in devs:
-            for ep in eps:
+            for ep in endpoints:
                 if ep.get("device") == remote_router:
                     return ep["ip"].split("/")[0]
     return None
@@ -115,7 +115,7 @@ def configurer_loopback(loopback_ip):
 !   
 """
 
-# Ajout de protocol_igp pour savoir si on applique le coût OSPF
+# MODIFICATION N°1 : Ajout de l'argument protocol_igp et de la logique OSPF
 def configurer_interfaces(interfaces, protocol_igp):
     cfg = ""
     for iface in interfaces:
@@ -139,7 +139,11 @@ def configurer_igp(as_data, interfaces, loopback_ip):
     - OSPF : annonce toutes les interfaces + la loopback0 (host route)
     - RIP  : network classful + redistribute connected pour annoncer loopback
     """
-    igp = as_data["igp"]["protocol"].upper()
+    igp_data = as_data.get("igp")
+    if not igp_data:
+        return ""
+
+    igp = igp_data["protocol"].upper()
 
     if igp == "RIP":
         cfg = """router rip
@@ -156,8 +160,8 @@ def configurer_igp(as_data, interfaces, loopback_ip):
         return cfg + "!\n"
 
     if igp == "OSPF":
-        process_id = as_data["igp"]["process_id"]
-        area = as_data["igp"]["area"]
+        process_id = igp_data["process_id"]
+        area = igp_data["area"]
         cfg = f"""router ospf {process_id}
  router-id {loopback_ip}
 """
@@ -206,6 +210,7 @@ def configurer_bgp_policies(intent):
 
         cfg += f"""route-map RM-OUT-TO-{target} permit 10
  match community {listname}
+!
 route-map RM-OUT-TO-{target} deny 20
 !
 """
@@ -244,7 +249,7 @@ def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, inte
  neighbor {peer_ip} route-map RM-OUT-TO-{role.upper()} out
 """
 
-    # ✅ NOUVEAU : pour AS terminaux, annoncer la loopback en BGP
+    # Pour AS terminaux, annoncer la loopback en BGP
     if as_data.get("advertise_loopback"):
         cfg += f" network {router_id} mask 255.255.255.255\n"
 
@@ -267,7 +272,7 @@ def get_router_loopback(router_name, intent):
                 return r["loopback"].split("/")[0]
     return None
 
-# Extraction de la métrique OSPF depuis le lien (si possible)
+# MODIFICATION N°2 : Extraction de la métrique OSPF depuis le lien
 def get_router_interfaces(router_name, intent):
     interfaces = []
     for link in intent.get("links", []):
@@ -349,15 +354,19 @@ def assembler_configuration(router_name, intent):
     # eBGP neighbors
     ebgp_neighbors = collect_ebgp_neighbors(router_name, intent)
 
+    # MODIFICATION N°3 : Récupération du protocole IGP pour l'envoyer à la fonction suivante
+    igp_data = as_data.get("igp")
+    protocol_igp = igp_data["protocol"].upper() if igp_data else None
+
     cfg = ""
     cfg += creer_entete(router_name)
     cfg += configurer_loopback(loopback_ip)
-    cfg += configurer_interfaces(interfaces)
+    
+    # CORRECTION : Ajout de protocol_igp dans l'appel de fonction (c'était l'erreur)
+    cfg += configurer_interfaces(interfaces, protocol_igp)
 
     # certains AS terminaux auront un igp minimal
-    # (donc il faut bien que "igp" existe dans le JSON)
     cfg += configurer_igp(as_data, interfaces, loopback_ip)
 
-    # ✅ appel modifié: on passe as_data
     cfg += configurer_bgp(as_data, as_data["asn"], loopback_ip, ibgp_neighbors, ebgp_neighbors, intent)
     return cfg
