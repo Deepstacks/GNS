@@ -216,15 +216,15 @@ route-map RM-OUT-TO-{target} deny 20
 !
 """  # Route-map pour appliquer la propagation des communautés en fonction de la relation
 
-    # Filtrage pour que les R8 (provider) ne reçoivent pas de routes des peers ou customers
-    # Ajout de la route-map pour R8 qui empêche l'entrée des routes des peers et customers
+    # Inverser la logique : **provider** doit recevoir les routes du **customer**, mais pas l'inverse
+    # Cette fois-ci, le provider reçoit bien les routes du customer et ne les envoie pas.
     for role, comm in communities.items():
         if role == "provider":
-            cfg += f"""route-map RM-IN-{role.upper()} deny 10
+            cfg += f"""route-map RM-IN-{role.upper()} permit 10
  match ip address prefix-list PEER_CUSTOMER_ROUTES
  deny 20
 !
-"""  # Cette modification empêche R8 de recevoir des routes internes des peers et customers
+"""  # Cette modification permet au provider de recevoir les routes du customer sans filtrer
 
     return cfg
 
