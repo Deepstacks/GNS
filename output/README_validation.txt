@@ -1,5 +1,5 @@
 VALIDATION GUIDE (Parts 2–3)
-Generated on: 2026-01-21T16:59:25
+Generated on: 2026-01-22T17:13:52
 
 A) IGP validation
 - RIP (AS_X):
@@ -10,7 +10,7 @@ A) IGP validation
 - OSPF (AS_Y):
   - show ip ospf neighbor
   - show ip route ospf
-  - ping <loopback> between routers inside AS_Y
+  - ping <loopback> between routers inside AS_Y                     PARTIE A VALIDÉE !!
 
 B) Loopback reachability
 - From each router, ping:

@@ -186,23 +186,23 @@ def configurer_bgp_policies(intent):
         cfg += f"ip community-list standard {role.upper()} permit {comm}\n"
     cfg += "\n"
 
-    # Appliquer les route-maps pour chaque rôle BGP
+    # Appliquer les route-maps pour chaque rôle BGP (customer, peer, provider)
     for role, comm in communities.items():
-        lp = local_pref[role]
+        lp = local_pref.get(role, 100)  # Valeur par défaut de 100 si non définie
         cfg += f"""route-map RM-IN-{role.upper()} permit 10
  set community {comm} additive
  set local-preference {lp}
 !
-"""
+"""  # Route-map d'entrée appliquant la préférence locale et les communautés
 
     # Route-map pour les annonces locales
     cfg += f"""route-map RM-SET-LOCAL permit 10
- set local-preference {local_pref['customer']}
+ set local-preference {local_pref.get('customer', 200)}
  set community {communities['customer']} additive
 !
-"""
+"""  # Applique la préférence locale pour les routes envoyées aux clients
 
-    # Configuration de propagation
+    # Configuration de propagation des communautés entre les AS
     for to_key, allowed_roles in policy.items():
         target = to_key.replace("to_", "").upper()
         listname = f"TO_{target}"
@@ -214,9 +214,23 @@ def configurer_bgp_policies(intent):
  match community {listname}
 route-map RM-OUT-TO-{target} deny 20
 !
-"""
+"""  # Route-map pour appliquer la propagation des communautés en fonction de la relation
+
+    # Filtrage pour que les R8 (provider) ne reçoivent pas de routes des peers ou customers
+    # Ajout de la route-map pour R8 qui empêche l'entrée des routes des peers et customers
+    for role, comm in communities.items():
+        if role == "provider":
+            cfg += f"""route-map RM-IN-{role.upper()} deny 10
+ match ip address prefix-list PEER_CUSTOMER_ROUTES
+ deny 20
+!
+"""  # Cette modification empêche R8 de recevoir des routes internes des peers et customers
 
     return cfg
+
+# =========================================================
+# CONFIGURER BGP
+# =========================================================
 
 def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, intent):
     """
@@ -245,12 +259,22 @@ def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, inte
     for n in ebgp_neighbors:
         role = n["relationship"].lower()
         peer_ip = n["ip"]
-        cfg += f""" neighbor {peer_ip} remote-as {n['remote_as']}
+        if role == "provider":
+            cfg += f""" neighbor {peer_ip} remote-as {n['remote_as']}
  neighbor {peer_ip} send-community
  neighbor {peer_ip} route-map RM-IN-{role.upper()} in
  neighbor {peer_ip} route-map RM-OUT-TO-{role.upper()} out
  neighbor {peer_ip} soft-reconfiguration inbound
-"""
+ neighbor {peer_ip} next-hop-self
+"""  # Applique la route-map d'entrée pour les providers
+        else:
+            cfg += f""" neighbor {peer_ip} remote-as {n['remote_as']}
+ neighbor {peer_ip} send-community
+ neighbor {peer_ip} route-map RM-IN-{role.upper()} in
+ neighbor {peer_ip} route-map RM-OUT-TO-{role.upper()} out
+ neighbor {peer_ip} soft-reconfiguration inbound
+ neighbor {peer_ip} next-hop-self
+"""  # Applique les route-maps pour autres rôles
 
     # Annonce de la loopback pour BGP
     if as_data.get("advertise_loopback"):

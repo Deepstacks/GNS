@@ -47,7 +47,7 @@ A) IGP validation
 - OSPF (AS_Y):
   - show ip ospf neighbor
   - show ip route ospf
-  - ping <loopback> between routers inside AS_Y
+  - ping <loopback> between routers inside AS_Y                     PARTIE A VALIDÉE !!
 
 B) Loopback reachability
 - From each router, ping:
