@@ -138,17 +138,19 @@
     "communities": {
       "customer": "65001:100",
       "peer": "65001:200",
-      "provider": "65001:300"
+      "provider": "65001:300",
+      "local": "65001:999"
     },
     "local_preference": {
       "customer": 200,
       "peer": 150,
-      "provider": 50
+      "provider": 50,
+      "local": 200
     },
     "propagation_policy": {
-      "to_customer": ["customer", "peer", "provider"],
-      "to_peer": ["customer"],
-      "to_provider": ["customer"]
+      "to_customer": ["local", "customer", "peer", "provider"],
+      "to_peer": ["local", "customer"],
+      "to_provider": ["local"]
     },
     "ebgp_peers": [
       {
@@ -177,4 +179,4 @@
       }
     ]
   }
-}
+ }
