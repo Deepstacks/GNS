@@ -10,11 +10,13 @@ def mask_to_dotted(mask):
     bits = (0xffffffff >> (32 - mask)) << (32 - mask)
     return ".".join(str((bits >> i) & 0xff) for i in [24, 16, 8, 0])
 
+
 def wildcard_from_prefixlen(prefixlen: int) -> str:
     """Ex: /30 -> 0.0.0.3"""
     host_bits = 32 - int(prefixlen)
     wildcard_int = (1 << host_bits) - 1 if host_bits > 0 else 0
     return ".".join(str((wildcard_int >> i) & 0xff) for i in [24, 16, 8, 0])
+
 
 def classful_major_network(ip: str) -> str:
     """
@@ -33,6 +35,7 @@ def classful_major_network(ip: str) -> str:
         return f"{o[0]}.{o[1]}.{o[2]}.0"
     return f"{o[0]}.0.0.0"
 
+
 def find_link_peer_ip(local_router: str, remote_router: str, intent: dict):
     """
     Cherche dans intent['links'] un lien entre local_router et remote_router
@@ -47,10 +50,12 @@ def find_link_peer_ip(local_router: str, remote_router: str, intent: dict):
                     return ep["ip"].split("/")[0]
     return None
 
+
 def get_router_asn(router_name: str, intent: dict):
     """Retourne l'ASN du routeur (via l'AS qui le contient)."""
     as_data = get_router_as(router_name, intent)
     return as_data["asn"] if as_data else None
+
 
 def infer_reverse_relationship(rel: str) -> str:
     """
@@ -63,6 +68,7 @@ def infer_reverse_relationship(rel: str) -> str:
     if rel == "provider":
         return "customer"
     return "peer"
+
 
 def validate_intent_minimal(intent: dict):
     """
@@ -96,6 +102,7 @@ def validate_intent_minimal(intent: dict):
                 f"Topo incomplète: ebgp_peers {lr}->{rr} mais aucun lien {lr}<->{rr} dans 'links'."
             )
 
+
 # =========================================================
 # BLOCS DE CONFIGURATION DE BASE
 # =========================================================
@@ -109,11 +116,13 @@ hostname {hostname}
 !
 """
 
+
 def configurer_loopback(loopback_ip):
     return f"""interface Loopback0
  ip address {loopback_ip} 255.255.255.255
 !
 """
+
 
 def configurer_interfaces(interfaces):
     cfg = ""
@@ -125,13 +134,17 @@ def configurer_interfaces(interfaces):
 """
     return cfg
 
+
 # =========================================================
 # IGP
 # =========================================================
 
 def configurer_igp(as_data, interfaces, loopback_ip):
     """
-    Configuration OSPF avec la possibilité de définir des métriques (coûts) OSPF.
+    - OSPF : annonce toutes les interfaces + la loopback0 (host route)
+    - RIP  : network classful + redistribute connected pour annoncer loopback
+    IMPORTANT: 'ip ospf cost' est une commande INTERFACE, pas 'router ospf'.
+               Donc on ne l'émet PAS ici (sinon % Invalid input au boot).
     """
     igp = as_data["igp"]["protocol"].upper()
 
@@ -145,7 +158,6 @@ def configurer_igp(as_data, interfaces, loopback_ip):
             majors.add(classful_major_network(iface["ip"]))
         for net in sorted(majors):
             cfg += f" network {net}\n"
-
         cfg += " redistribute connected\n"
         return cfg + "!\n"
 
@@ -160,20 +172,30 @@ def configurer_igp(as_data, interfaces, loopback_ip):
             prefixlen = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
             net = ipaddress.IPv4Interface(f"{iface['ip']}/{prefixlen}").network
             wildcard = wildcard_from_prefixlen(prefixlen)
-            # Appliquer un coût OSPF si défini dans l'intent
-            cost = iface.get("cost", 10)  # Valeur par défaut de 10 si pas spécifié
             cfg += f" network {net.network_address} {wildcard} area {area}\n"
-            cfg += f" ip ospf cost {cost}\n"  # Application de la métrique OSPF
+
         cfg += f" network {loopback_ip} 0.0.0.0 area {area}\n"
         return cfg + "!\n"
 
     return ""
+
 
 # =========================================================
 # BGP POLICIES (PARTIE 3.4)
 # =========================================================
 
 def configurer_bgp_policies(intent):
+    """
+    Génère:
+    - community-lists pour CUSTOMER/PEER/PROVIDER
+    - route-maps d'entrée RM-IN-*
+      => set local-pref + set community (tag)
+    - route-map RM-SET-LOCAL pour routes originees localement (loopbacks)
+      => tag customer + local-pref customer (valley-free)
+    - community-lists TO_CUSTOMER / TO_PEER / TO_PROVIDER selon propagation_policy
+    - route-maps de sortie RM-OUT-TO-*
+      => match community-list correspondante + deny ensuite
+    """
     bgp = intent["bgp"]
     communities = bgp["communities"]
     local_pref = bgp["local_preference"]
@@ -181,60 +203,55 @@ def configurer_bgp_policies(intent):
 
     cfg = ""
 
-    # Définir les communautés BGP
+    # Base roles
     for role, comm in communities.items():
         cfg += f"ip community-list standard {role.upper()} permit {comm}\n"
     cfg += "\n"
 
-    # Appliquer les route-maps pour chaque rôle BGP (customer, peer, provider)
+    # Inbound marking + local-pref
     for role, comm in communities.items():
-        lp = local_pref.get(role, 100)  # Valeur par défaut de 100 si non définie
+        lp = local_pref[role]
         cfg += f"""route-map RM-IN-{role.upper()} permit 10
  set community {comm} additive
  set local-preference {lp}
 !
-"""  # Route-map d'entrée appliquant la préférence locale et les communautés
+"""
 
-    # Route-map pour les annonces locales
+    # Local originated routes (loopback via 'network ... route-map RM-SET-LOCAL')
     cfg += f"""route-map RM-SET-LOCAL permit 10
- set local-preference {local_pref.get('customer', 200)}
+ set local-preference {local_pref['customer']}
  set community {communities['customer']} additive
 !
-"""  # Applique la préférence locale pour les routes envoyées aux clients
+"""
 
-    # Configuration de propagation des communautés entre les AS
+    # Propagation policy (valley-free)
     for to_key, allowed_roles in policy.items():
         target = to_key.replace("to_", "").upper()
         listname = f"TO_{target}"
+
         for r in allowed_roles:
             cfg += f"ip community-list standard {listname} permit {communities[r]}\n"
         cfg += "\n"
 
         cfg += f"""route-map RM-OUT-TO-{target} permit 10
  match community {listname}
+!
 route-map RM-OUT-TO-{target} deny 20
 !
-"""  # Route-map pour appliquer la propagation des communautés en fonction de la relation
-
-    # Inverser la logique : **provider** doit recevoir les routes du **customer**, mais pas l'inverse
-    # Cette fois-ci, le provider reçoit bien les routes du customer et ne les envoie pas.
-    for role, comm in communities.items():
-        if role == "provider":
-            cfg += f"""route-map RM-IN-{role.upper()} permit 10
- match ip address prefix-list PEER_CUSTOMER_ROUTES
- deny 20
-!
-"""  # Cette modification permet au provider de recevoir les routes du customer sans filtrer
+"""
 
     return cfg
 
-# =========================================================
-# CONFIGURER BGP
-# =========================================================
 
 def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, intent):
     """
-    Configuration complète de BGP avec gestion des route-maps et des politiques de propagation.
+    - iBGP full mesh sur loopbacks
+    - eBGP sur liens inter-AS (IP link)
+    - Applique les route-maps:
+        IN  : RM-IN-<ROLE>
+        OUT : RM-OUT-TO-<ROLE>
+    - soft-reconfiguration inbound pour pouvoir faire:
+        show ip bgp neighbors X received-routes
     """
     if not ibgp_neighbors and not ebgp_neighbors:
         return ""
@@ -246,7 +263,7 @@ def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, inte
  bgp log-neighbor-changes
 """
 
-    # Configuration iBGP en full-mesh
+    # iBGP neighbors
     for n in ibgp_neighbors:
         cfg += f""" neighbor {n} remote-as {asn}
  neighbor {n} update-source Loopback0
@@ -255,32 +272,23 @@ def configurer_bgp(as_data, asn, router_id, ibgp_neighbors, ebgp_neighbors, inte
  neighbor {n} soft-reconfiguration inbound
 """
 
-    # Configuration des voisins eBGP
+    # eBGP neighbors
     for n in ebgp_neighbors:
         role = n["relationship"].lower()
         peer_ip = n["ip"]
-        if role == "provider":
-            cfg += f""" neighbor {peer_ip} remote-as {n['remote_as']}
+        cfg += f""" neighbor {peer_ip} remote-as {n['remote_as']}
  neighbor {peer_ip} send-community
  neighbor {peer_ip} route-map RM-IN-{role.upper()} in
  neighbor {peer_ip} route-map RM-OUT-TO-{role.upper()} out
  neighbor {peer_ip} soft-reconfiguration inbound
- neighbor {peer_ip} next-hop-self
-"""  # Applique la route-map d'entrée pour les providers
-        else:
-            cfg += f""" neighbor {peer_ip} remote-as {n['remote_as']}
- neighbor {peer_ip} send-community
- neighbor {peer_ip} route-map RM-IN-{role.upper()} in
- neighbor {peer_ip} route-map RM-OUT-TO-{role.upper()} out
- neighbor {peer_ip} soft-reconfiguration inbound
- neighbor {peer_ip} next-hop-self
-"""  # Applique les route-maps pour autres rôles
+"""
 
-    # Annonce de la loopback pour BGP
+    # annonce de la loopback pour BGP
     if as_data.get("advertise_loopback"):
         cfg += f" network {router_id} mask 255.255.255.255 route-map RM-SET-LOCAL\n"
 
     return cfg + "!\n"
+
 
 # =========================================================
 # LOGIQUE INTENT
@@ -292,12 +300,14 @@ def get_router_as(router_name, intent):
             return as_data
     return None
 
+
 def get_router_loopback(router_name, intent):
     for as_data in intent.get("autonomous_systems", []):
         for r in as_data.get("routers", []):
             if r["name"] == router_name:
                 return r["loopback"].split("/")[0]
     return None
+
 
 def get_router_interfaces(router_name, intent):
     interfaces = []
@@ -308,11 +318,18 @@ def get_router_interfaces(router_name, intent):
                 interfaces.append({
                     "name": ep["interface"],
                     "ip": ip,
-                    "mask": mask_to_dotted(mask)
+                    "mask": mask_to_dotted(mask),
                 })
     return interfaces
 
+
 def collect_ebgp_neighbors(router_name: str, intent: dict):
+    """
+    Construit la liste des voisins eBGP pour CE routeur en se basant sur:
+    - bgp.ebgp_peers (déclarations)
+    - links (pour retrouver l'IP du voisin sur le lien)
+    + déduction "reverse" si un seul sens est déclaré (robuste).
+    """
     neighbors = []
     peers = intent.get("bgp", {}).get("ebgp_peers", [])
     declared = {(p["local_router"], p["remote_router"]) for p in peers}
@@ -321,6 +338,7 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
         lr = p["local_router"]
         rr = p["remote_router"]
 
+        # Sens déclaré: lr -> rr
         if lr == router_name:
             remote_ip = find_link_peer_ip(lr, rr, intent)
             if remote_ip is None:
@@ -328,9 +346,10 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
             neighbors.append({
                 "ip": remote_ip,
                 "remote_as": p["remote_as"],
-                "relationship": p["relationship"]
+                "relationship": p["relationship"],
             })
 
+        # Sens inverse non déclaré: rr -> lr (on déduit)
         if rr == router_name and (rr, lr) not in declared:
             remote_ip = find_link_peer_ip(rr, lr, intent)
             if remote_ip is None:
@@ -341,10 +360,11 @@ def collect_ebgp_neighbors(router_name: str, intent: dict):
             neighbors.append({
                 "ip": remote_ip,
                 "remote_as": remote_as,
-                "relationship": infer_reverse_relationship(p["relationship"])
+                "relationship": infer_reverse_relationship(p["relationship"]),
             })
 
     return neighbors
+
 
 # =========================================================
 # ASSEMBLER CONFIGURATION COMPLETE
