@@ -107,7 +107,8 @@
       "endpoints": [
         { "device": "R5", "interface": "GigabitEthernet1/0", "ip": "10.0.0.17/30" },
         { "device": "R7", "interface": "GigabitEthernet1/0", "ip": "10.0.0.18/30" }
-      ]
+      ],
+      "ospf_metric": 50
     },
     {
       "endpoints": [

@@ -109,21 +109,30 @@ hostname {hostname}
 !
 """
 
+def configurer_interfaces(interfaces, protocol_igp: str):
+    cfg = ""
+    for iface in interfaces:
+        cfg += f"""interface {iface['name']}
+ ip address {iface['ip']} {iface['mask']}
+"""
+
+        # coût OSPF uniquement si le routeur est en OSPF
+        metric = iface.get("ospf_metric")
+        if protocol_igp.upper() == "OSPF" and metric is not None:
+            cfg += f" ip ospf cost {int(metric)}\n"
+
+        cfg += """ no shutdown
+!
+"""
+    return cfg
+
 def configurer_loopback(loopback_ip):
     return f"""interface Loopback0
  ip address {loopback_ip} 255.255.255.255
 !
 """
 
-def configurer_interfaces(interfaces):
-    cfg = ""
-    for iface in interfaces:
-        cfg += f"""interface {iface['name']}
- ip address {iface['ip']} {iface['mask']}
- no shutdown
-!
-"""
-    return cfg
+
 
 # =========================================================
 # IGP
@@ -160,8 +169,6 @@ def configurer_igp(as_data, interfaces, loopback_ip):
             prefixlen = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
             net = ipaddress.IPv4Interface(f"{iface['ip']}/{prefixlen}").network
             wildcard = wildcard_from_prefixlen(prefixlen)
-            # Appliquer un coût OSPF si défini dans l'intent
-            cost = iface.get("cost", 10)  # Valeur par défaut de 10 si pas spécifié
             cfg += f" network {net.network_address} {wildcard} area {area}\n"
         cfg += f" network {loopback_ip} 0.0.0.0 area {area}\n"
         return cfg + "!\n"
@@ -333,15 +340,22 @@ def get_router_loopback(router_name, intent):
 def get_router_interfaces(router_name, intent):
     interfaces = []
     for link in intent.get("links", []):
+        # lecture de la métrique portée par le lien (choisis UNE clé et garde-la)
+        metric = link.get("ospf_metric")  # <- on va utiliser cette clé dans TON json
+
         for ep in link.get("endpoints", []):
             if ep.get("device") == router_name:
                 ip, mask = ep["ip"].split("/")
-                interfaces.append({
+                iface_data = {
                     "name": ep["interface"],
                     "ip": ip,
                     "mask": mask_to_dotted(mask)
-                })
+                }
+                if metric is not None:
+                    iface_data["ospf_metric"] = metric
+                interfaces.append(iface_data)
     return interfaces
+
 
 def collect_ebgp_neighbors(router_name: str, intent: dict):
     neighbors = []
@@ -407,7 +421,8 @@ def assembler_configuration(router_name, intent):
     cfg = ""
     cfg += creer_entete(router_name)
     cfg += configurer_loopback(loopback_ip)
-    cfg += configurer_interfaces(interfaces)
+    protocol_igp = as_data["igp"]["protocol"].upper()
+    cfg += configurer_interfaces(interfaces, protocol_igp)
     cfg += configurer_igp(as_data, interfaces, loopback_ip)
     cfg += configurer_bgp(as_data, as_data["asn"], loopback_ip, ibgp_neighbors, ebgp_neighbors, intent)
     return cfg
