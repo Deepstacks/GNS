@@ -1,3 +1,9 @@
+Pojet d'architecture réseau sur GNS3 : implémentation d'un script qui permet de mettre directement les configurations routeur à partir d'un intent file .
+
+
+
+
+
 Pour mettre en place les résultats de notre projet de la meilleure des manières, veuillez suivre les consignes suivantes : 
 
 1) Ouvrez le fichier GNS.gns3 dans GNS3 SANS lancer les nodes
